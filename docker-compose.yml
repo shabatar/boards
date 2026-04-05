@@ -1,0 +1,131 @@
+# All-in-one: app + Postgres + Supabase services
+# Usage: cp .env.docker.example .env.docker  (fill in values, then)
+#        docker compose up --build
+#
+# Then visit http://boards.local:3000 (add to /etc/hosts first)
+# Or http://localhost:3000
+
+services:
+  db:
+    image: supabase/postgres:17.6.1.095
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: postgres
+    # Port only on loopback — not exposed to network
+    ports:
+      - "127.0.0.1:54322:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./supabase/docker/zz-set-passwords.sh:/docker-entrypoint-initdb.d/zz-set-passwords.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  auth:
+    image: supabase/gotrue:v2.170.0
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: on-failure
+    environment:
+      GOTRUE_DB_DRIVER: postgres
+      GOTRUE_DB_DATABASE_URL: postgres://supabase_auth_admin:${POSTGRES_PASSWORD}@db:5432/postgres
+      GOTRUE_SITE_URL: http://boards.local:3000
+      GOTRUE_URI_ALLOW_LIST: "http://localhost:3000/**,http://boards.local:3000/**"
+      GOTRUE_JWT_SECRET: ${JWT_SECRET}
+      GOTRUE_JWT_EXP: 3600
+      GOTRUE_DISABLE_SIGNUP: "false"
+      GOTRUE_EXTERNAL_EMAIL_ENABLED: "true"
+      GOTRUE_MAILER_AUTOCONFIRM: "true"
+      GOTRUE_JWT_DEFAULT_GROUP_NAME: authenticated
+      API_EXTERNAL_URL: http://localhost:8000
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8081/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # Runs app migrations after GoTrue has created auth.users
+  migrate:
+    image: supabase/postgres:17.6.1.095
+    depends_on:
+      auth:
+        condition: service_healthy
+    volumes:
+      - ./supabase/migrations:/migrations:ro
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        for f in /migrations/00001_*.sql /migrations/00002_*.sql /migrations/00003_*.sql /migrations/00004_*.sql; do
+          [ -f "$$f" ] && echo "Running $$f..." && psql "postgres://supabase_admin:${POSTGRES_PASSWORD}@db:5432/postgres" -f "$$f"
+        done
+        echo "Migrations complete."
+
+  gateway:
+    image: nginx:alpine
+    depends_on:
+      auth:
+        condition: service_healthy
+      rest:
+        condition: service_started
+    volumes:
+      - ./supabase/docker/kong.conf:/etc/nginx/nginx.conf:ro
+    ports:
+      - "8000:8000"
+
+  rest:
+    image: postgrest/postgrest:v13.0.0
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      PGRST_DB_URI: postgres://authenticator:${POSTGRES_PASSWORD}@db:5432/postgres
+      PGRST_DB_SCHEMAS: public
+      PGRST_DB_ANON_ROLE: anon
+      PGRST_JWT_SECRET: ${JWT_SECRET}
+    # No host port — only reachable via gateway
+
+  realtime:
+    image: supabase/realtime:v2.34.47
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DB_HOST: db
+      DB_PORT: 5432
+      DB_USER: supabase_admin
+      DB_PASSWORD: ${POSTGRES_PASSWORD}
+      DB_NAME: postgres
+      DB_AFTER_CONNECT_QUERY: "SET search_path TO _realtime"
+      PORT: 4000
+      SECRET_KEY_BASE: ${SECRET_KEY_BASE}
+      REPLICATION_MODE: RLS
+      REPLICATION_POLL_INTERVAL: 100
+      SECURE_CHANNELS: "true"
+      JWT_SECRET: ${JWT_SECRET}
+      RLIMIT_NOFILE: "1048576"
+      APP_NAME: realtime
+      ERL_AFLAGS: "-proto_dist inet_tcp"
+    # No host port — only reachable via gateway
+
+  app:
+    build:
+      context: .
+      args:
+        NEXT_PUBLIC_SUPABASE_URL: http://localhost:8000
+        NEXT_PUBLIC_SUPABASE_ANON_KEY: ${SUPABASE_ANON_KEY}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      NEXT_PUBLIC_SUPABASE_URL: http://localhost:8000
+      NEXT_PUBLIC_SUPABASE_ANON_KEY: ${SUPABASE_ANON_KEY}
+      SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY}
+      SUPABASE_INTERNAL_URL: http://gateway:8000
+    ports:
+      - "3000:3000"
+
+volumes:
+  pgdata:
