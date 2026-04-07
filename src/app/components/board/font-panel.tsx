@@ -3,7 +3,38 @@
 import { useUIStore } from '@/app/stores/ui-store'
 import { useBoardStore } from '@/app/stores/board-store'
 import { cn, fontMap } from '@/lib/utils'
-import { Check, ArrowUp, ArrowDown } from 'lucide-react'
+import { createPersistedValue } from '@/lib/persisted-value'
+import { Check, ArrowUp, ArrowDown, Pipette } from 'lucide-react'
+import { EmojiPicker } from './emoji-picker'
+import { setCurrentEmoji } from '@/app/stores/emoji-pref'
+
+// ── Recently used colors (persisted in localStorage) ────────
+
+const RECENT_MAX = 3
+const recentColorsPref = createPersistedValue<string[]>('boards.recentColors', [])
+
+function pushRecent(color: string) {
+  if (!color || color === 'transparent') return
+  const current = recentColorsPref.get()
+  recentColorsPref.set([color, ...current.filter((c) => c !== color)].slice(0, RECENT_MAX))
+}
+
+// Chromium-only EyeDropper API. Falls back gracefully when unsupported.
+type EyeDropperResult = { sRGBHex: string }
+type EyeDropperCtor = new () => { open: () => Promise<EyeDropperResult> }
+declare global {
+  interface Window { EyeDropper?: EyeDropperCtor }
+}
+
+async function pickColorFromScreen(): Promise<string | null> {
+  if (typeof window === 'undefined' || !window.EyeDropper) return null
+  try {
+    const result = await new window.EyeDropper().open()
+    return result.sRGBHex
+  } catch {
+    return null // user cancelled
+  }
+}
 
 // ── Color palette ───────────────────────────────────────────
 
@@ -108,14 +139,17 @@ export function FontPanel() {
   // Show panel only for single selection
   const singleId = selectedIds.size === 1 ? [...selectedIds][0] : null
   const item = useBoardStore((s) => singleId ? s.items[singleId] : null)
+  const recentColors = recentColorsPref.useValue()
 
   if (!item) return null
 
   const isTextual = item.type === 'note' || item.type === 'text'
+  const isEmoji = item.type === 'emoji'
   const hasColor = item.type === 'note' || item.type === 'rect' || item.type === 'triangle' || item.type === 'circle'
   const hasStroke = item.type === 'rect' || item.type === 'arrow' || item.type === 'triangle' || item.type === 'circle' || item.type === 'freehand'
+  const hasPadding = item.type !== 'arrow' && item.type !== 'freehand' && item.type !== 'emoji'
 
-  if (!isTextual && !hasColor && !hasStroke) return null
+  if (!isTextual && !hasColor && !hasStroke && !isEmoji) return null
 
   function update(patch: Record<string, unknown>) {
     if (!item) return
@@ -127,6 +161,17 @@ export function FontPanel() {
       className="absolute right-3 top-[56px] z-20 flex flex-col gap-3 rounded-2xl border border-border p-2.5 shadow-lg transition-colors"
       style={{ backgroundColor: 'var(--bg-overlay)', backdropFilter: `blur(var(--panel-blur))` }}
     >
+      {/* Emoji glyph picker */}
+      {isEmoji && (
+        <div className="flex flex-col gap-1">
+          <span className="px-1 text-[10px] font-medium uppercase tracking-wider text-text-muted">Emoji</span>
+          <EmojiPicker
+            value={item.content}
+            onPick={(emoji) => { update({ content: emoji }); setCurrentEmoji(emoji) }}
+          />
+        </div>
+      )}
+
       {/* Color */}
       {hasColor && (
         <div className="flex flex-col gap-1.5">
@@ -134,8 +179,60 @@ export function FontPanel() {
           <ColorGrid
             colors={item.type === 'note' ? noteColors : shapeColors}
             value={item.color}
-            onChange={(color) => update({ color })}
+            onChange={(color) => { update({ color }); pushRecent(color) }}
           />
+          {recentColors.length > 0 && (
+            <div className="flex flex-col gap-1">
+              <span className="px-1 text-[9px] uppercase tracking-wider text-text-muted/80">Recent</span>
+              <div className="flex gap-1">
+                {recentColors.map((c) => (
+                  <button
+                    key={c}
+                    onClick={() => update({ color: c })}
+                    title={c}
+                    className={cn(
+                      'relative h-6 w-6 rounded-md border transition-transform hover:scale-110',
+                      c === 'transparent' ? 'border-border bg-bg-surface' : 'border-transparent',
+                      item.color === c && 'ring-2 ring-accent ring-offset-1',
+                    )}
+                    style={{ backgroundColor: c === 'transparent' ? undefined : c }}
+                  >
+                    {item.color === c && c !== 'transparent' && (
+                      <Check size={12} className="absolute inset-0 m-auto text-zinc-700/70" />
+                    )}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+          <div className="mt-0.5 flex items-center gap-2 px-1 text-[10px] text-text-muted">
+            <label className="flex items-center gap-1 cursor-pointer">
+              <input
+                type="color"
+                value={item.color === 'transparent' ? '#ffffff' : item.color}
+                onChange={(e) => { update({ color: e.target.value }); pushRecent(e.target.value) }}
+                className="h-5 w-5 cursor-pointer rounded border border-border bg-transparent p-0"
+                title="Custom color"
+              />
+              Custom
+            </label>
+            <button
+              type="button"
+              onClick={async () => {
+                const picked = await pickColorFromScreen()
+                if (picked) {
+                  update({ color: picked })
+                  pushRecent(picked)
+                } else if (typeof window !== 'undefined' && !window.EyeDropper) {
+                  alert('Eyedropper not supported in this browser. Try Chrome or Edge.')
+                }
+              }}
+              title="Pick color from screen"
+              className="flex h-5 w-5 items-center justify-center rounded border border-border hover:bg-accent-subtle hover:text-accent"
+            >
+              <Pipette size={11} />
+            </button>
+          </div>
         </div>
       )}
 
@@ -169,6 +266,24 @@ export function FontPanel() {
               </button>
             ))}
           </div>
+        </div>
+      )}
+
+      {/* Padding */}
+      {hasPadding && (
+        <div className="flex flex-col gap-1">
+          <span className="px-1 text-[10px] font-medium uppercase tracking-wider text-text-muted">
+            Padding · {item.padding}px
+          </span>
+          <input
+            type="range"
+            min={0}
+            max={48}
+            step={1}
+            value={item.padding}
+            onChange={(e) => update({ padding: Number(e.target.value) })}
+            className="h-1 w-full cursor-pointer accent-accent"
+          />
         </div>
       )}
 

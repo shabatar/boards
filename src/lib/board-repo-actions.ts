@@ -88,9 +88,11 @@ export async function serverDeleteItem(id: string): Promise<void> {
     .from('board_items')
     .select('board_id')
     .eq('id', id)
-    .single()
+    .maybeSingle()
 
-  if (!item) throw new Error('Item not found')
+  // Item already gone (or never inserted) — treat delete as a no-op
+  // so optimistic clients don't surface a spurious error.
+  if (!item) return
 
   await verifyWriteAccess(item.board_id)
 

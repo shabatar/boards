@@ -20,38 +20,52 @@ interface ItemDefaults {
   strokeColor: string
   strokeWidth: number
   points: Array<{ x: number; y: number }> | null
+  padding: number
 }
 
 const defaults: Record<ItemType, ItemDefaults> = {
   note: {
     width: 200, height: 200, color: '#fef08a', content: '',
     fontSize: 14, fontFamily: 'sans', strokeColor: '#18181b', strokeWidth: 2, points: null,
+    padding: 12,
   },
   text: {
     width: 240, height: 48, color: 'transparent', content: '',
     fontSize: 16, fontFamily: 'sans', strokeColor: '#18181b', strokeWidth: 2, points: null,
+    padding: 8,
   },
   rect: {
     width: 200, height: 150, color: 'transparent', content: '',
     fontSize: 14, fontFamily: 'sans', strokeColor: '#18181b', strokeWidth: 2, points: null,
+    padding: 12,
   },
   arrow: {
     width: 200, height: 0, color: 'transparent', content: '',
     fontSize: 14, fontFamily: 'sans', strokeColor: '#18181b', strokeWidth: 2,
     points: [{ x: 0, y: 0 }, { x: 200, y: 0 }],
+    padding: 0,
   },
   triangle: {
     width: 180, height: 160, color: 'transparent', content: '',
     fontSize: 14, fontFamily: 'sans', strokeColor: '#18181b', strokeWidth: 2, points: null,
+    padding: 16,
   },
   circle: {
     width: 160, height: 160, color: 'transparent', content: '',
     fontSize: 14, fontFamily: 'sans', strokeColor: '#18181b', strokeWidth: 2, points: null,
+    padding: 16,
   },
   freehand: {
     width: 0, height: 0, color: 'transparent', content: '',
     fontSize: 14, fontFamily: 'sans', strokeColor: '#18181b', strokeWidth: 2,
     points: [],
+    padding: 0,
+  },
+  emoji: {
+    width: 80, height: 80, color: 'transparent', content: '✅',
+    fontSize: 64, fontFamily: 'sans', strokeColor: '#18181b', strokeWidth: 0,
+    points: null,
+    padding: 0,
   },
 }
 
@@ -89,5 +103,6 @@ export function createItem(opts: CreateItemOptions): BoardItem {
     strokeColor: stroke,
     strokeWidth: d.strokeWidth,
     points: d.points ? [...d.points] : null,
+    padding: d.padding,
   }
 }

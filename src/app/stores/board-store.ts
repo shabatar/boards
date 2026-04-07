@@ -10,7 +10,7 @@ import {
 
 // ── Item types ──────────────────────────────────────────────
 
-export type ItemType = 'note' | 'text' | 'rect' | 'arrow' | 'triangle' | 'circle' | 'freehand'
+export type ItemType = 'note' | 'text' | 'rect' | 'arrow' | 'triangle' | 'circle' | 'freehand' | 'emoji'
 
 export type BoardItem = {
   id: string
@@ -29,6 +29,7 @@ export type BoardItem = {
   strokeColor: string
   strokeWidth: number
   points: Array<{ x: number; y: number }> | null
+  padding: number
 }
 
 // ── Store ───────────────────────────────────────────────────
@@ -36,6 +37,10 @@ export type BoardItem = {
 interface BoardState {
   boardId: string | null
   items: Record<string, BoardItem>
+  /** IDs of items whose insert/delete is in-flight to the DB. The poller
+   *  must not garbage-collect these — otherwise locally-created items get
+   *  wiped before the round-trip completes. */
+  pendingIds: Set<string>
 
   hydrate: (boardId: string, items: BoardItem[]) => void
   addItem: (item: BoardItem) => void
@@ -58,6 +63,7 @@ function onSaveError(err: unknown) {
 export const useBoardStore = create<BoardState>()((set, get) => ({
   boardId: null,
   items: {},
+  pendingIds: new Set<string>(),
 
   hydrate(boardId, items) {
     const record: Record<string, BoardItem> = {}
@@ -66,8 +72,21 @@ export const useBoardStore = create<BoardState>()((set, get) => ({
   },
 
   addItem(item) {
-    set((s) => ({ items: { ...s.items, [item.id]: item } }))
-    dbInsert(item).catch(onSaveError)
+    set((s) => {
+      const pending = new Set(s.pendingIds)
+      pending.add(item.id)
+      return { items: { ...s.items, [item.id]: item }, pendingIds: pending }
+    })
+    dbInsert(item)
+      .catch(onSaveError)
+      .finally(() => {
+        set((s) => {
+          if (!s.pendingIds.has(item.id)) return s
+          const pending = new Set(s.pendingIds)
+          pending.delete(item.id)
+          return { pendingIds: pending }
+        })
+      })
   },
 
   updateItem(id, patch) {
@@ -100,8 +119,7 @@ export const useBoardStore = create<BoardState>()((set, get) => ({
       zIndex: get().nextZIndex(),
     }
 
-    set((s) => ({ items: { ...s.items, [dup.id]: dup } }))
-    dbInsert(dup).catch(onSaveError)
+    get().addItem(dup)
 
     return dup.id
   },

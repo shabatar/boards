@@ -30,9 +30,12 @@ export function usePollBoard(fetchFn: FetchFn | null, intervalMs = 3000) {
           }
         }
 
-        // Apply remote deletions
+        // Apply remote deletions — but skip items whose insert is still
+        // in flight to the server, otherwise we GC freshly pasted/created
+        // items before the round-trip completes.
+        const pending = store.pendingIds
         for (const id of Object.keys(current)) {
-          if (!remoteMap.has(id)) {
+          if (!remoteMap.has(id) && !pending.has(id)) {
             store.applyRemoteDelete(id)
           }
         }

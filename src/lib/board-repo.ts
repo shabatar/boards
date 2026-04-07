@@ -32,6 +32,7 @@ export function rowToItem(row: DbRow): BoardItem {
     strokeColor: row.stroke_color,
     strokeWidth: row.stroke_width,
     points: row.points,
+    padding: row.padding ?? 12,
   }
 }
 
@@ -53,13 +54,32 @@ function itemToRow(item: BoardItem): Omit<DbRow, 'created_at' | 'updated_at'> {
     stroke_color: item.strokeColor,
     stroke_width: item.strokeWidth,
     points: item.points,
+    padding: item.padding,
   }
 }
 
 // ── Writes (server actions with admin client) ───────────────
+//
+// Per-item promise chain. Updates and deletes wait for the in-flight insert
+// (and any prior write) before running. This prevents "Item not found"
+// races when a user pastes/duplicates an item and immediately edits or
+// deletes it before the initial insert reaches the DB.
+
+const itemWriteChains = new Map<string, Promise<unknown>>()
+
+function chainWrite<T>(id: string, op: () => Promise<T>): Promise<T> {
+  const prev = itemWriteChains.get(id) ?? Promise.resolve()
+  const next = prev.catch(() => undefined).then(op)
+  itemWriteChains.set(id, next)
+  // Clear the chain entry once it settles, but only if it's still the tail.
+  next.finally(() => {
+    if (itemWriteChains.get(id) === next) itemWriteChains.delete(id)
+  })
+  return next
+}
 
 export async function insertItem(item: BoardItem): Promise<void> {
-  await serverInsertItem(itemToRow(item))
+  await chainWrite(item.id, () => serverInsertItem(itemToRow(item)))
 }
 
 async function updateItemInDb(
@@ -79,13 +99,14 @@ async function updateItemInDb(
   if (patch.strokeColor !== undefined) dbPatch.stroke_color = patch.strokeColor
   if (patch.strokeWidth !== undefined) dbPatch.stroke_width = patch.strokeWidth
   if (patch.points !== undefined) dbPatch.points = patch.points
+  if (patch.padding !== undefined) dbPatch.padding = patch.padding
 
   if (Object.keys(dbPatch).length === 0) return
-  await serverUpdateItem(id, dbPatch)
+  await chainWrite(id, () => serverUpdateItem(id, dbPatch))
 }
 
 export async function deleteItemFromDb(id: string): Promise<void> {
-  await serverDeleteItem(id)
+  await chainWrite(id, () => serverDeleteItem(id))
 }
 
 // ── Debounced update ────────────────────────────────────────

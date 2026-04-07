@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 
-export type Tool = 'select' | 'marquee' | 'note' | 'text' | 'rect' | 'arrow' | 'triangle' | 'circle' | 'freehand'
+export type Tool = 'select' | 'marquee' | 'note' | 'text' | 'rect' | 'arrow' | 'triangle' | 'circle' | 'freehand' | 'emoji'
 
 interface UIState {
   // Mode

@@ -26,7 +26,7 @@ export type BoardMember = {
 export type BoardItem = {
   id: string
   board_id: string
-  type: 'note' | 'text' | 'rect' | 'arrow' | 'triangle' | 'circle' | 'freehand'
+  type: 'note' | 'text' | 'rect' | 'arrow' | 'triangle' | 'circle' | 'freehand' | 'emoji'
   x: number
   y: number
   width: number
@@ -42,6 +42,7 @@ export type BoardItem = {
   stroke_color: string
   stroke_width: number
   points: Array<{ x: number; y: number }> | null
+  padding: number
 }
 
 export type Database = {

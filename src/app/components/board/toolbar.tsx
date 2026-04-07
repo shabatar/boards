@@ -6,24 +6,42 @@ import {
   Triangle, Circle, Pencil, ChevronRight,
 } from 'lucide-react'
 import { useUIStore, type Tool } from '@/app/stores/ui-store'
+import { useCurrentEmoji } from '@/app/stores/emoji-pref'
 import { cn } from '@/lib/utils'
 
 // ── Shape sub-tools (flyout) ────────────────────────────────
 
-const shapeTools = [
-  { id: 'rect' as Tool, icon: Square, label: 'Rectangle' },
-  { id: 'triangle' as Tool, icon: Triangle, label: 'Triangle' },
-  { id: 'circle' as Tool, icon: Circle, label: 'Circle' },
+type ShapeToolDef = {
+  id: Tool
+  label: string
+  icon?: React.ComponentType<{ size?: number; 'aria-hidden'?: boolean }>
+  /** Render an emoji glyph instead of a lucide icon */
+  glyph?: 'currentEmoji'
+}
+
+const shapeTools: ShapeToolDef[] = [
+  { id: 'rect', icon: Square, label: 'Rectangle' },
+  { id: 'triangle', icon: Triangle, label: 'Triangle' },
+  { id: 'circle', icon: Circle, label: 'Circle' },
+  { id: 'emoji', glyph: 'currentEmoji', label: 'Emoji' },
 ]
 
 function ShapePicker() {
   const [open, setOpen] = useState(false)
   const selectedTool = useUIStore((s) => s.selectedTool)
   const setSelectedTool = useUIStore((s) => s.setSelectedTool)
+  const currentEmoji = useCurrentEmoji()
 
   const isShapeActive = shapeTools.some((s) => s.id === selectedTool)
   const activeShape = shapeTools.find((s) => s.id === selectedTool) ?? shapeTools[0]
-  const ActiveIcon = activeShape.icon
+
+  function renderToolIcon(tool: ShapeToolDef, size: number) {
+    if (tool.glyph === 'currentEmoji') {
+      return <span style={{ fontSize: size, lineHeight: 1 }}>{currentEmoji}</span>
+    }
+    const Icon = tool.icon!
+    return <Icon size={size} aria-hidden />
+  }
 
   return (
     <div className="relative">
@@ -43,7 +61,7 @@ function ShapePicker() {
           isShapeActive && 'bg-accent-subtle text-accent',
         )}
       >
-        <ActiveIcon size={18} aria-hidden />
+        {renderToolIcon(activeShape, 18)}
         <ChevronRight size={10} aria-hidden className="opacity-50" />
       </button>
 
@@ -52,20 +70,20 @@ function ShapePicker() {
           className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 flex gap-1 rounded-xl border border-border p-1.5 shadow-lg"
           style={{ backgroundColor: 'var(--bg-overlay)', backdropFilter: `blur(var(--panel-blur))` }}
         >
-          {shapeTools.map(({ id, icon: Icon, label }) => (
+          {shapeTools.map((tool) => (
             <button
-              key={id}
+              key={tool.id}
               onClick={() => {
-                setSelectedTool(id)
+                setSelectedTool(tool.id)
                 setOpen(false)
               }}
-              title={label}
+              title={tool.label}
               className={cn(
                 'rounded-lg p-2 text-text-muted transition-all hover:bg-accent-subtle hover:text-accent',
-                selectedTool === id && 'bg-accent-subtle text-accent',
+                selectedTool === tool.id && 'bg-accent-subtle text-accent',
               )}
             >
-              <Icon size={16} aria-hidden />
+              {renderToolIcon(tool, 16)}
             </button>
           ))}
         </div>

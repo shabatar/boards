@@ -10,6 +10,7 @@ import { usePanZoom } from '@/app/hooks/use-pan-zoom'
 import { track } from '@/lib/analytics'
 import { setShareToken } from '@/lib/board-repo-actions'
 import { createItem, getDefaultSize } from '@/lib/item-factory'
+import { getCurrentEmoji } from '@/app/stores/emoji-pref'
 import { useRealtimeBoard } from '@/app/hooks/use-realtime-board'
 import { usePollBoard } from '@/app/hooks/use-poll-board'
 import { fetchBoardItems } from '@/lib/poll-actions'
@@ -25,11 +26,19 @@ import { BoardItemView } from './board-item'
 const dragDrawTools = new Set(['arrow', 'freehand', 'rect', 'triangle', 'circle'])
 
 // Tools that are click-to-place (click to center item)
-const clickPlaceTools = new Set(['note', 'text'])
+const clickPlaceTools = new Set(['note', 'text', 'emoji'])
 
-/** Convert screen coords to board coords.
- *  The canvas div is a static click target (no transform).
- *  We subtract its position, then account for pan and zoom manually. */
+// Magic prefix used to round-trip board items through the system clipboard.
+// We write JSON with this prefix on internal copy/cut, and detect it on
+// paste to distinguish "rich" board paste from a plain-text paste.
+const CLIPBOARD_MARKER = 'boards/v1:'
+
+interface ClipboardPayload {
+  __boards: 1
+  items: BoardItem[]
+}
+
+/** Convert screen coords to board coords. */
 function screenToBoardCoords(
   clientX: number,
   clientY: number,
@@ -41,6 +50,82 @@ function screenToBoardCoords(
     x: (clientX - rect.left - panX) / zoom,
     y: (clientY - rect.top - panY) / zoom,
   }
+}
+
+function viewportCenterBoardCoords(canvasEl: HTMLElement) {
+  const rect = canvasEl.getBoundingClientRect()
+  return screenToBoardCoords(rect.left + rect.width / 2, rect.top + rect.height / 2, canvasEl)
+}
+
+/** Deep-clone an item (including its `points` array) so later mutations
+ *  to the original don't shift what was copied. */
+function cloneItem(item: BoardItem): BoardItem {
+  return { ...item, points: item.points ? item.points.map((p) => ({ ...p })) : null }
+}
+
+function snapshotSelected(ids: Iterable<string>): BoardItem[] {
+  const store = useBoardStore.getState()
+  const out: BoardItem[] = []
+  for (const id of ids) {
+    const it = store.items[id]
+    if (it) out.push(cloneItem(it))
+  }
+  return out
+}
+
+function writeItemsToClipboard(items: BoardItem[]) {
+  const payload: ClipboardPayload = { __boards: 1, items }
+  navigator.clipboard?.writeText(CLIPBOARD_MARKER + JSON.stringify(payload)).catch(() => {})
+}
+
+/** Centroid-anchor a clipboard group at the cursor and add each item. */
+function pasteItemsAt(items: BoardItem[], anchor: { x: number; y: number }, boardId: string) {
+  let cx = 0, cy = 0
+  for (const s of items) { cx += s.x + s.width / 2; cy += s.y + s.height / 2 }
+  cx /= items.length
+  cy /= items.length
+  const dx = anchor.x - cx
+  const dy = anchor.y - cy
+  const store = useBoardStore.getState()
+  let z = store.nextZIndex()
+  const newIds = new Set<string>()
+  for (const source of items) {
+    const pasted: BoardItem = {
+      ...source,
+      id: crypto.randomUUID(),
+      boardId,
+      x: source.x + dx,
+      y: source.y + dy,
+      zIndex: z++,
+    }
+    store.addItem(pasted)
+    newIds.add(pasted.id)
+  }
+  useUIStore.getState().setSelectedIds(newIds)
+}
+
+/** Create a text item containing arbitrary string content at a board point. */
+function createTextItemAt(
+  content: string,
+  anchor: { x: number; y: number },
+  boardId: string,
+  userId: string | null,
+  source: 'system_paste' | 'drop',
+) {
+  const item = createItem({
+    boardId,
+    type: 'text',
+    x: anchor.x,
+    y: anchor.y,
+    zIndex: useBoardStore.getState().nextZIndex(),
+    createdBy: userId,
+  })
+  item.content = content
+  const lines = content.split('\n').length
+  item.height = Math.max(item.height, 24 + lines * (item.fontSize + 4))
+  useBoardStore.getState().addItem(item)
+  useUIStore.getState().selectItem(item.id)
+  track('item_created', { type: 'text', source })
 }
 
 interface BoardCanvasProps {
@@ -62,8 +147,10 @@ export function BoardCanvas({ boardId, boardTitle, ownerId, initialItems, userId
   const viewportRef = useRef<HTMLDivElement>(null)
   const canvasRef = useRef<HTMLDivElement>(null)
   const hydratedRef = useRef(false)
-  const clipboardRef = useRef<BoardItem[]>([])
   const drawingRef = useRef<{ itemId: string; startX: number; startY: number } | null>(null)
+  const lastCreateClickRef = useRef<{ time: number; x: number; y: number } | null>(null)
+  // Cursor in board coords — used as the paste/drop anchor.
+  const cursorBoardRef = useRef<{ x: number; y: number } | null>(null)
 
   const panX = useUIStore((s) => s.panX)
   const panY = useUIStore((s) => s.panY)
@@ -116,35 +203,27 @@ export function BoardCanvas({ boardId, boardTitle, ownerId, initialItems, userId
           if (!(e.ctrlKey || e.metaKey)) break
           const ids = useUIStore.getState().selectedIds
           if (ids.size > 0) {
-            const store = useBoardStore.getState()
-            clipboardRef.current = [...ids].map(id => store.items[id]).filter(Boolean)
+            e.preventDefault()
+            writeItemsToClipboard(snapshotSelected(ids))
+            toast.success(`${ids.size} item${ids.size > 1 ? 's' : ''} copied`, { id: 'item-copied', duration: 1200 })
           }
           break
         }
-        case 'v':
-        case 'V': {
+        case 'x':
+        case 'X': {
           if (!(e.ctrlKey || e.metaKey)) break
           e.preventDefault()
-          const clip = clipboardRef.current
-          if (clip && clip.length > 0) {
-            const newIds = new Set<string>()
-            for (const source of clip) {
-              const pasted: BoardItem = {
-                ...source,
-                id: crypto.randomUUID(),
-                x: source.x + 30,
-                y: source.y + 30,
-                zIndex: useBoardStore.getState().nextZIndex(),
-              }
-              useBoardStore.getState().addItem(pasted)
-              newIds.add(pasted.id)
-              source.x += 30
-              source.y += 30
-            }
-            useUIStore.getState().setSelectedIds(newIds)
+          const ids = useUIStore.getState().selectedIds
+          if (ids.size > 0) {
+            writeItemsToClipboard(snapshotSelected(ids))
+            const store = useBoardStore.getState()
+            for (const id of ids) store.removeItem(id)
+            useUIStore.getState().deselectAll()
+            toast.success(`${ids.size} item${ids.size > 1 ? 's' : ''} cut`, { id: 'item-cut', duration: 1200 })
           }
           break
         }
+        // Cmd/Ctrl+V is handled by the document-level `paste` event below.
         case 'd':
         case 'D': {
           if (!(e.ctrlKey || e.metaKey)) break
@@ -199,11 +278,67 @@ export function BoardCanvas({ boardId, boardTitle, ownerId, initialItems, userId
         case '5': useUIStore.getState().setSelectedTool('rect'); break
         case '6': useUIStore.getState().setSelectedTool('arrow'); break
         case '7': useUIStore.getState().setSelectedTool('freehand'); break
+        case '8': useUIStore.getState().setSelectedTool('emoji'); break
       }
     }
+    // Reads clipboardData synchronously — no permission prompt — and
+    // routes based on a JSON marker the app writes for internal copies.
+    function onPaste(e: ClipboardEvent) {
+      if (isReadOnly) return
+      if (useUIStore.getState().editingItemId) return
+      const target = e.target as HTMLElement | null
+      if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)) {
+        return
+      }
+
+      const anchor = cursorBoardRef.current ?? (canvasRef.current && viewportCenterBoardCoords(canvasRef.current))
+      if (!anchor) return
+
+      const text = e.clipboardData?.getData('text/plain') ?? ''
+
+      if (text.startsWith(CLIPBOARD_MARKER)) {
+        try {
+          const payload = JSON.parse(text.slice(CLIPBOARD_MARKER.length)) as ClipboardPayload
+          if (payload.__boards === 1 && Array.isArray(payload.items) && payload.items.length > 0) {
+            e.preventDefault()
+            pasteItemsAt(payload.items, anchor, boardId)
+            return
+          }
+        } catch {
+          // Malformed payload — fall through to plain text paste
+        }
+      }
+
+      if (!text) return
+      e.preventDefault()
+      createTextItemAt(text, anchor, boardId, userId, 'system_paste')
+    }
+    // A missed pointerup leaves a "ghost" item that follows the cursor.
+    function clearStuckCanvasState() {
+      if (drawingRef.current) {
+        const id = drawingRef.current.itemId
+        const item = useBoardStore.getState().items[id]
+        drawingRef.current = null
+        if (item && item.width < 10 && item.height < 10 && item.type !== 'freehand') {
+          const size = getDefaultSize(item.type)
+          useBoardStore.getState().updateItem(id, { width: size.width, height: size.height })
+        }
+      }
+      if (useUIStore.getState().marquee) useUIStore.getState().setMarquee(null)
+    }
     window.addEventListener('keydown', onKeyDown)
-    return () => window.removeEventListener('keydown', onKeyDown)
-  }, [isReadOnly])
+    window.addEventListener('pointerup', clearStuckCanvasState)
+    window.addEventListener('pointercancel', clearStuckCanvasState)
+    window.addEventListener('blur', clearStuckCanvasState)
+    document.addEventListener('paste', onPaste)
+    return () => {
+      window.removeEventListener('keydown', onKeyDown)
+      window.removeEventListener('pointerup', clearStuckCanvasState)
+      window.removeEventListener('pointercancel', clearStuckCanvasState)
+      window.removeEventListener('blur', clearStuckCanvasState)
+      document.removeEventListener('paste', onPaste)
+    }
+  }, [isReadOnly, boardId, userId])
 
   // ── Canvas pointer handlers ───────────────────────────────
 
@@ -229,8 +364,22 @@ export function BoardCanvas({ boardId, boardTitle, ownerId, initialItems, userId
       return
     }
 
-    // For draw tools, allow starting on top of existing items
     const board = screenToBoardCoords(e.clientX, e.clientY, canvasRef.current!)
+
+    // Require a double-click (within 400ms / 8px) to create — single
+    // clicks are too easy to fire by accident.
+    const now = performance.now()
+    const last = lastCreateClickRef.current
+    const isDoubleClick =
+      !!last &&
+      now - last.time < 400 &&
+      Math.abs(e.clientX - last.x) < 8 &&
+      Math.abs(e.clientY - last.y) < 8
+    if (!isDoubleClick) {
+      lastCreateClickRef.current = { time: now, x: e.clientX, y: e.clientY }
+      return
+    }
+    lastCreateClickRef.current = null
 
     if (dragDrawTools.has(tool)) {
       e.stopPropagation()
@@ -274,6 +423,7 @@ export function BoardCanvas({ boardId, boardTitle, ownerId, initialItems, userId
         zIndex: useBoardStore.getState().nextZIndex(),
         createdBy: userId,
       })
+      if (item.type === 'emoji') item.content = getCurrentEmoji()
       useBoardStore.getState().addItem(item)
       useUIStore.getState().selectItem(item.id)
       track('item_created', { type: item.type })
@@ -281,6 +431,11 @@ export function BoardCanvas({ boardId, boardTitle, ownerId, initialItems, userId
   }, [boardId, userId, isReadOnly])
 
   const onCanvasPointerMove = useCallback((e: React.PointerEvent) => {
+    // Track cursor position in board coordinates so paste can anchor here.
+    if (canvasRef.current) {
+      cursorBoardRef.current = screenToBoardCoords(e.clientX, e.clientY, canvasRef.current)
+    }
+
     // Marquee selection
     const marquee = useUIStore.getState().marquee
     if (marquee) {
@@ -360,6 +515,23 @@ export function BoardCanvas({ boardId, boardTitle, ownerId, initialItems, userId
       })
     }
   }, [])
+
+  // Drop URLs / text from any app onto the canvas as a text item.
+  // Links auto-render as clickable via TextDisplay.
+  const onCanvasDrop = useCallback((e: React.DragEvent) => {
+    if (isReadOnly) return
+    e.preventDefault()
+    const dt = e.dataTransfer
+    if (!dt) return
+
+    const uri = dt.getData('text/uri-list')
+    const plain = dt.getData('text/plain')
+    const content = (uri && uri.split('\n').filter((l) => l && !l.startsWith('#')).join('\n')) || plain
+    if (!content) return
+
+    const dropAt = screenToBoardCoords(e.clientX, e.clientY, canvasRef.current!)
+    createTextItemAt(content, dropAt, boardId, userId, 'drop')
+  }, [boardId, userId, isReadOnly])
 
   const onCanvasPointerUp = useCallback(() => {
     // End marquee
@@ -446,6 +618,8 @@ export function BoardCanvas({ boardId, boardTitle, ownerId, initialItems, userId
         onPointerDown={onCanvasPointerDown}
         onPointerMove={onCanvasPointerMove}
         onPointerUp={onCanvasPointerUp}
+        onDragOver={(e) => { if (!isReadOnly) e.preventDefault() }}
+        onDrop={onCanvasDrop}
         className="absolute inset-0 top-[45px]"
       >
         {/* ── Transform layer (positions items in board space) ── */}

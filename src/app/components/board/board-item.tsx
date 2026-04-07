@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useRef } from 'react'
+import { useEffect, useMemo, useRef } from 'react'
 import type { BoardItem } from '@/app/stores/board-store'
 import { useBoardStore } from '@/app/stores/board-store'
 import { useUIStore } from '@/app/stores/ui-store'
@@ -9,8 +9,50 @@ import { cn, fontMap } from '@/lib/utils'
 
 // ── Text content (shared by note, text, and shapes with text) ──
 
+// Trailing punctuation that's commonly part of sentences is excluded so
+// URLs don't swallow it.
+const URL_REGEX = /\b((?:https?:\/\/|www\.)[^\s<]+[^\s<.,;:!?)\]'"])/gi
+
+function renderWithLinks(text: string, linkClass: string): React.ReactNode[] {
+  // Cheap test: if no URL prefix appears, skip the regex entirely.
+  if (text.indexOf('http') === -1 && text.indexOf('www.') === -1) return [text]
+  const out: React.ReactNode[] = []
+  let lastIndex = 0
+  let key = 0
+  text.replace(URL_REGEX, (match, _g, offset: number) => {
+    if (offset > lastIndex) out.push(text.slice(lastIndex, offset))
+    const href = match.startsWith('http') ? match : `https://${match}`
+    out.push(
+      <a
+        key={`l${key++}`}
+        href={href}
+        target="_blank"
+        rel="noopener noreferrer"
+        draggable={false}
+        className={linkClass}
+        onPointerDown={(e) => e.stopPropagation()}
+        onClick={(e) => e.stopPropagation()}
+        onDragStart={(e) => e.preventDefault()}
+      >
+        {match}
+      </a>,
+    )
+    lastIndex = offset + match.length
+    return match
+  })
+  if (lastIndex < text.length) out.push(text.slice(lastIndex))
+  return out.length === 0 ? [text] : out
+}
+
 function TextDisplay({ item }: { item: BoardItem }) {
   const placeholder = item.type === 'note' ? 'Empty note' : item.type === 'text' ? 'Empty text' : ''
+  const linkClass = item.type === 'note'
+    ? 'underline decoration-zinc-500/60 underline-offset-2 hover:text-accent'
+    : 'underline decoration-current/60 underline-offset-2 text-accent hover:opacity-80'
+  const rendered = useMemo(
+    () => (item.content ? renderWithLinks(item.content, linkClass) : null),
+    [item.content, linkClass],
+  )
   return (
     <p
       className="leading-snug whitespace-pre-wrap break-words"
@@ -20,7 +62,7 @@ function TextDisplay({ item }: { item: BoardItem }) {
         color: item.type === 'note' ? '#27272a' : 'var(--text)',
       }}
     >
-      {item.content || (placeholder && <span className="italic text-text-muted">{placeholder}</span>)}
+      {rendered ?? (placeholder && <span className="italic text-text-muted">{placeholder}</span>)}
     </p>
   )
 }
@@ -29,7 +71,7 @@ function TextDisplay({ item }: { item: BoardItem }) {
 
 function NoteContent({ item }: { item: BoardItem }) {
   return (
-    <div className="h-full w-full p-3">
+    <div className="h-full w-full" style={{ padding: item.padding }}>
       <TextDisplay item={item} />
     </div>
   )
@@ -37,7 +79,7 @@ function NoteContent({ item }: { item: BoardItem }) {
 
 function TextContent({ item }: { item: BoardItem }) {
   return (
-    <div className="h-full w-full p-2">
+    <div className="h-full w-full" style={{ padding: item.padding }}>
       <TextDisplay item={item} />
     </div>
   )
@@ -46,10 +88,11 @@ function TextContent({ item }: { item: BoardItem }) {
 function RectContent({ item }: { item: BoardItem }) {
   return (
     <div
-      className="flex h-full w-full items-center justify-center rounded-md p-3"
+      className="flex h-full w-full items-center justify-center rounded-md"
       style={{
         border: `${item.strokeWidth}px solid ${item.strokeColor}`,
         backgroundColor: item.color === 'transparent' ? undefined : item.color,
+        padding: item.padding,
       }}
     >
       {item.content && <TextDisplay item={item} />}
@@ -74,7 +117,10 @@ function TriangleContent({ item }: { item: BoardItem }) {
         />
       </svg>
       {item.content && (
-        <div className="absolute inset-0 flex items-center justify-center p-4 pt-8">
+        <div
+          className="absolute inset-0 flex items-center justify-center"
+          style={{ padding: item.padding, paddingTop: item.padding * 2 }}
+        >
           <TextDisplay item={item} />
         </div>
       )}
@@ -96,7 +142,10 @@ function CircleContent({ item }: { item: BoardItem }) {
         />
       </svg>
       {item.content && (
-        <div className="absolute inset-0 flex items-center justify-center p-4">
+        <div
+          className="absolute inset-0 flex items-center justify-center"
+          style={{ padding: item.padding }}
+        >
           <TextDisplay item={item} />
         </div>
       )}
@@ -135,6 +184,16 @@ function ArrowContent({ item }: { item: BoardItem }) {
   )
 }
 
+function EmojiContent({ item }: { item: BoardItem }) {
+  return (
+    <div className="flex h-full w-full select-none items-center justify-center leading-none">
+      <span style={{ fontSize: Math.min(item.width, item.height) * 0.85, lineHeight: 1 }}>
+        {item.content || '😀'}
+      </span>
+    </div>
+  )
+}
+
 function FreehandContent({ item }: { item: BoardItem }) {
   const pts = item.points
   if (!pts || pts.length < 2) return null
@@ -165,10 +224,12 @@ const readOnlyByType: Record<BoardItem['type'], React.FC<{ item: BoardItem }>> =
   circle: CircleContent,
   arrow: ArrowContent,
   freehand: FreehandContent,
+  emoji: EmojiContent,
 }
 
 // ── Editable types (double-click to type text) ──────────────
 
+// Emoji items are changed via the FontPanel picker, not inline typing.
 const editableTypes = new Set<BoardItem['type']>(['note', 'text', 'rect', 'triangle', 'circle'])
 
 // ── Inline editor ───────────────────────────────────────────
@@ -290,15 +351,40 @@ export function BoardItemView({ item }: { item: BoardItem }) {
 
   const ReadOnly = readOnlyByType[item.type]
 
+  // Safety net: clear any in-flight drag state when the pointer is released
+  // anywhere (or focus is lost). Without this, a click that doesn't fire a
+  // matching pointerup on the item itself (e.g. release outside the window,
+  // pointercancel from a swipe gesture, focus loss) leaves dragRef populated
+  // — and the next pointermove over the item silently snaps it to the cursor.
+  useEffect(() => {
+    function clearDrag() {
+      dragRef.current = null
+    }
+    window.addEventListener('pointerup', clearDrag)
+    window.addEventListener('pointercancel', clearDrag)
+    window.addEventListener('blur', clearDrag)
+    return () => {
+      window.removeEventListener('pointerup', clearDrag)
+      window.removeEventListener('pointercancel', clearDrag)
+      window.removeEventListener('blur', clearDrag)
+    }
+  }, [])
+
   function onPointerDown(e: React.PointerEvent) {
     if (e.button !== 0) return
     e.stopPropagation()
     if (isEditing) return
     if (isViewOnly) return // No drag in viewer mode
 
-    // Ctrl/Cmd+click for additive (multi) selection
+    // Ctrl/Cmd+click for additive (multi) selection.
+    // If the item is already part of a multi-selection, preserve it so the
+    // user can drag the whole group together.
     const additive = e.ctrlKey || e.metaKey
-    useUIStore.getState().selectItem(item.id, additive)
+    const currentIds = useUIStore.getState().selectedIds
+    const alreadyInGroup = currentIds.size > 1 && currentIds.has(item.id)
+    if (!alreadyInGroup) {
+      useUIStore.getState().selectItem(item.id, additive)
+    }
 
     dragRef.current = {
       pointerId: e.pointerId,
@@ -382,14 +468,21 @@ export function BoardItemView({ item }: { item: BoardItem }) {
     >
       {/* Note/text: inline editor replaces content */}
       {isEditable && !isShapeWithEditor && (item.type === 'note' || item.type === 'text') ? (
-        <div className={cn('h-full w-full', item.type === 'note' ? 'p-3' : 'p-2')}>
-          {isEditing ? <ItemEditor item={item} /> : <ReadOnly item={item} />}
-        </div>
+        isEditing ? (
+          <div className="h-full w-full" style={{ padding: item.padding }}>
+            <ItemEditor item={item} />
+          </div>
+        ) : (
+          <ReadOnly item={item} />
+        )
       ) : isShapeWithEditor ? (
         // Shape with editor overlay
         <>
           <ReadOnly item={item} />
-          <div className="absolute inset-0 flex items-center justify-center p-4">
+          <div
+            className="absolute inset-0 flex items-center justify-center"
+            style={{ padding: item.padding }}
+          >
             <ItemEditor item={item} />
           </div>
         </>
